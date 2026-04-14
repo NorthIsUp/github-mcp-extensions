@@ -6,9 +6,7 @@ Designed to run **alongside** the standard GitHub MCP — it doesn't replace it,
 
 ## The problem
 
-The standard GitHub MCP server can resolve review threads and reply to comments, but its `get_review_comments` doesn't return the IDs those actions need. You can't resolve a thread without its thread ID. You can't reply to a comment without its comment ID. You can't apply code suggestions at all — you'd have to copy the code, edit the file, and push manually. And there's no way to dismiss reviews, react to comments, or manage reviewers.
-
-This server fills those gaps.
+The standard GitHub MCP server doesn't cover the full PR review workflow. You can't apply code suggestions, dismiss reviews, react to comments, edit review comments, or manage reviewers. This server adds those missing pieces.
 
 ## Install
 
