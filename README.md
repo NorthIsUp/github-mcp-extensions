@@ -6,14 +6,9 @@ Designed to run **alongside** the standard GitHub MCP — it doesn't replace it,
 
 ## The problem
 
-The standard GitHub MCP has `resolve_review_thread` and `add_reply_to_pull_request_comment`, but `get_review_comments` doesn't return the IDs those tools need:
+The standard GitHub MCP server can resolve review threads and reply to comments, but its `get_review_comments` doesn't return the IDs those actions need. You can't resolve a thread without its thread ID. You can't reply to a comment without its comment ID. You can't apply code suggestions at all — you'd have to copy the code, edit the file, and push manually. And there's no way to dismiss reviews, react to comments, or manage reviewers.
 
-- No thread `node_id` (`PRRT_…`) → `resolve_review_thread` is unusable
-- No comment numeric `id` → must regex-parse from `html_url`
-- No way to apply `\`\`\`suggestion` blocks without manual edit/commit/push
-- No dismiss, react, edit, or reviewer management
-
-This server fixes all of that.
+This server fills those gaps.
 
 ## Install
 
@@ -38,7 +33,7 @@ Add to your MCP client config (Claude Code, Claude Desktop, etc.):
       "command": "uvx",
       "args": ["github-mcp-extensions"],
       "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
+        "GITHUB_TOKEN": "ghp_..."
       }
     }
   }
@@ -54,7 +49,7 @@ Or from git:
       "command": "uvx",
       "args": ["--from", "git+https://github.com/NorthIsUp/github-mcp-extended", "github-mcp-extensions"],
       "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
+        "GITHUB_TOKEN": "ghp_..."
       }
     }
   }
@@ -214,6 +209,7 @@ GITHUB_TOKEN=ghp_... uv run mcp dev src/github_mcp_extensions/server.py
 
 | Variable | Description |
 |---|---|
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub token (preferred, matches standard GitHub MCP) |
-| `GITHUB_TOKEN` | Fallback token |
+| `GITHUB_TOKEN` | GitHub token (most common, GitHub Actions default) |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | Alternative (matches standard GitHub MCP) |
+| `GH_TOKEN` | Alternative (matches gh CLI) |
 | `GITHUB_API_URL` | API base URL (default: `https://api.github.com`). Set for GitHub Enterprise. |
