@@ -1,8 +1,7 @@
 """
 Lightweight GitHub API client supporting both REST v3 and GraphQL v4.
 
-Reads GITHUB_PERSONAL_ACCESS_TOKEN (matching the standard GitHub MCP)
-or falls back to GITHUB_TOKEN.
+Token resolution order: GITHUB_TOKEN, GITHUB_PERSONAL_ACCESS_TOKEN, GH_TOKEN.
 """
 
 from __future__ import annotations
@@ -29,8 +28,9 @@ class GitHubAPI(BaseModel):
         if isinstance(data, dict):
             if not data.get("token"):
                 data["token"] = (
-                    os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-                    or os.environ.get("GITHUB_TOKEN")
+                    os.environ.get("GITHUB_TOKEN")
+                    or os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+                    or os.environ.get("GH_TOKEN")
                     or ""
                 )
             if not data.get("base_url"):
@@ -41,7 +41,7 @@ class GitHubAPI(BaseModel):
     def _validate_token(self) -> GitHubAPI:
         if not self.token:
             raise ValueError(
-                "Missing GitHub token. Set GITHUB_PERSONAL_ACCESS_TOKEN or GITHUB_TOKEN."
+                "Missing GitHub token. Set GITHUB_TOKEN, GITHUB_PERSONAL_ACCESS_TOKEN, or GH_TOKEN."
             )
         return self
 
@@ -61,7 +61,7 @@ class GitHubAPI(BaseModel):
         assert self._client is not None
         return self._client
 
-    # ── REST (untyped) ──────────────────────────────────────────────
+    # ── REST (untyped) ──────────────────────────────────────────────────────
 
     async def rest_raw(
         self,
@@ -75,7 +75,7 @@ class GitHubAPI(BaseModel):
             return None
         return resp.json()
 
-    # ── REST (typed) ────────────────────────────────────────────────
+    # ── REST (typed) ────────────────────────────────────────────────────────
 
     async def rest(
         self,
@@ -87,7 +87,7 @@ class GitHubAPI(BaseModel):
         data = await self.rest_raw(method, path, json=json)
         return model.model_validate(data)
 
-    # ── GraphQL (untyped) ───────────────────────────────────────────
+    # ── GraphQL (untyped) ─────────────────────────────────────────────────────
 
     async def graphql_raw(
         self,
@@ -107,7 +107,7 @@ class GitHubAPI(BaseModel):
             raise RuntimeError("GitHub GraphQL: empty response (no data)")
         return body["data"]
 
-    # ── GraphQL (typed) ─────────────────────────────────────────────
+    # ── GraphQL (typed) ───────────────────────────────────────────────────────
 
     async def graphql(
         self,
