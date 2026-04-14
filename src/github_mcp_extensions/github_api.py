@@ -8,54 +8,93 @@ or falls back to GITHUB_TOKEN.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+T = TypeVar("T", bound=BaseModel)
 
 
-class GitHubAPI:
-    def __init__(self) -> None:
-        token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN") or os.environ.get(
-            "GITHUB_TOKEN"
-        )
-        if not token:
-            raise RuntimeError(
+class GitHubAPI(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    token: str = Field(default="")
+    base_url: str = Field(default="")
+    _client: httpx.AsyncClient | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_env(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("token"):
+                data["token"] = (
+                    os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+                    or os.environ.get("GITHUB_TOKEN")
+                    or ""
+                )
+            if not data.get("base_url"):
+                data["base_url"] = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+        return data
+
+    @model_validator(mode="after")
+    def _validate_token(self) -> GitHubAPI:
+        if not self.token:
+            raise ValueError(
                 "Missing GitHub token. Set GITHUB_PERSONAL_ACCESS_TOKEN or GITHUB_TOKEN."
             )
+        return self
 
-        base_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    def model_post_init(self, __context: Any) -> None:
         self._client = httpx.AsyncClient(
-            base_url=base_url,
+            base_url=self.base_url,
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {self.token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             timeout=30.0,
         )
 
-    # ── REST ────────────────────────────────────────────────────────
+    @property
+    def client(self) -> httpx.AsyncClient:
+        assert self._client is not None
+        return self._client
 
-    async def rest(
+    # ── REST (untyped) ──────────────────────────────────────────────
+
+    async def rest_raw(
         self,
         method: str,
         path: str,
         json: Any = None,
     ) -> Any:
-        resp = await self._client.request(method, path, json=json)
+        resp = await self.client.request(method, path, json=json)
         resp.raise_for_status()
         if resp.status_code == 204:
             return None
         return resp.json()
 
-    # ── GraphQL ─────────────────────────────────────────────────────
+    # ── REST (typed) ────────────────────────────────────────────────
 
-    async def graphql(
+    async def rest(
+        self,
+        model: type[T],
+        method: str,
+        path: str,
+        json: Any = None,
+    ) -> T:
+        data = await self.rest_raw(method, path, json=json)
+        return model.model_validate(data)
+
+    # ── GraphQL (untyped) ───────────────────────────────────────────
+
+    async def graphql_raw(
         self,
         query: str,
         variables: dict[str, Any] | None = None,
     ) -> Any:
-        resp = await self._client.post(
+        resp = await self.client.post(
             "/graphql",
             json={"query": query, "variables": variables or {}},
         )
@@ -68,5 +107,16 @@ class GitHubAPI:
             raise RuntimeError("GitHub GraphQL: empty response (no data)")
         return body["data"]
 
+    # ── GraphQL (typed) ─────────────────────────────────────────────
+
+    async def graphql(
+        self,
+        model: type[T],
+        query: str,
+        variables: dict[str, Any] | None = None,
+    ) -> T:
+        data = await self.graphql_raw(query, variables)
+        return model.model_validate(data)
+
     async def close(self) -> None:
-        await self._client.aclose()
+        await self.client.aclose()

@@ -7,29 +7,21 @@ from __future__ import annotations
 import asyncio
 import re
 from base64 import b64decode
-from dataclasses import dataclass
-from typing import Any
 from urllib.parse import quote
 
 from .github_api import GitHubAPI
-
-# ── Types ────────────────────────────────────────────────────────────
-
-@dataclass
-class ParsedSuggestion:
-    comment_id: int
-    path: str
-    start_line: int
-    end_line: int
-    replacement: str  # The replacement text (lines joined with \n)
-    original_comment: dict[str, Any]
-
-
-@dataclass
-class FileChange:
-    path: str
-    content: str
-
+from .models import (
+    CommitResult,
+    FileChange,
+    FileContentResponse,
+    GitBlobResponse,
+    GitCommitResponse,
+    GitRefResponse,
+    GitTreeResponse,
+    ParsedSuggestion,
+    PullRequestResponse,
+    ReviewCommentResponse,
+)
 
 # ── Parsing ──────────────────────────────────────────────────────────
 
@@ -56,23 +48,22 @@ async def fetch_and_parse_suggestion(
     repo: str,
     comment_id: int,
 ) -> ParsedSuggestion:
-    comment = await github.rest("GET", f"/repos/{owner}/{repo}/pulls/comments/{comment_id}")
+    comment = await github.rest(
+        ReviewCommentResponse, "GET", f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
+    )
 
-    replacement = parse_suggestion_from_body(comment["body"])
+    replacement = parse_suggestion_from_body(comment.body)
     if replacement is None:
         raise ValueError(f"Comment {comment_id} does not contain a ```suggestion block.")
 
-    end_line = comment.get("line")
-    if end_line is None:
+    if comment.line is None:
         raise ValueError(f"Comment {comment_id} has no line position — cannot apply suggestion.")
-
-    start_line = comment.get("start_line") or end_line
 
     return ParsedSuggestion(
         comment_id=comment_id,
-        path=comment["path"],
-        start_line=start_line,
-        end_line=end_line,
+        path=comment.path,
+        start_line=comment.start_line or comment.line,
+        end_line=comment.line,
         replacement=replacement,
         original_comment=comment,
     )
@@ -105,13 +96,13 @@ async def apply_multiple_suggestions(
 ) -> list[FileChange]:
     """Fetch, parse, and apply multiple suggestions. Returns modified file contents."""
     # 1. Fetch all suggestions concurrently
-    suggestions = await asyncio.gather(
+    suggestions = list(await asyncio.gather(
         *(fetch_and_parse_suggestion(github, owner, repo, cid) for cid in comment_ids)
-    )
+    ))
 
     # 2. Get PR head ref
-    pr = await github.rest("GET", f"/repos/{owner}/{repo}/pulls/{pull_number}")
-    head_ref = pr["head"]["ref"]
+    pr = await github.rest(PullRequestResponse, "GET", f"/repos/{owner}/{repo}/pulls/{pull_number}")
+    head_ref = pr.head.ref
 
     # 3. Group by file path
     by_file: dict[str, list[ParsedSuggestion]] = {}
@@ -138,9 +129,11 @@ async def apply_multiple_suggestions(
 
         # Fetch current file content
         file_data = await github.rest(
-            "GET", f"/repos/{owner}/{repo}/contents/{quote(path, safe='')}?ref={quote(head_ref, safe='')}"
+            FileContentResponse,
+            "GET",
+            f"/repos/{owner}/{repo}/contents/{quote(path, safe='')}?ref={quote(head_ref, safe='')}",
         )
-        file_content = b64decode(file_data["content"]).decode("utf-8")
+        file_content = b64decode(file_data.content).decode("utf-8")
 
         # Apply each suggestion (already sorted descending)
         for s in file_suggestions:
@@ -162,19 +155,24 @@ async def commit_file_changes(
     branch: str,
     message: str,
     changes: list[FileChange],
-) -> dict[str, str]:
-    """Create a single commit with multiple file changes. Returns {sha, url}."""
+) -> CommitResult:
+    """Create a single commit with multiple file changes."""
     # Get current ref
-    ref = await github.rest("GET", f"/repos/{owner}/{repo}/git/ref/heads/{quote(branch, safe='')}")
-    base_sha = ref["object"]["sha"]
+    ref = await github.rest(
+        GitRefResponse, "GET", f"/repos/{owner}/{repo}/git/ref/heads/{quote(branch, safe='')}"
+    )
+    base_sha = ref.object.sha
 
     # Get base commit's tree
-    base_commit = await github.rest("GET", f"/repos/{owner}/{repo}/git/commits/{base_sha}")
+    base_commit = await github.rest(
+        GitCommitResponse, "GET", f"/repos/{owner}/{repo}/git/commits/{base_sha}"
+    )
 
     # Create blobs for each changed file
     tree_items = []
     for change in changes:
         blob = await github.rest(
+            GitBlobResponse,
             "POST",
             f"/repos/{owner}/{repo}/git/blobs",
             json={"content": change.content, "encoding": "utf-8"},
@@ -183,28 +181,30 @@ async def commit_file_changes(
             "path": change.path,
             "mode": "100644",
             "type": "blob",
-            "sha": blob["sha"],
+            "sha": blob.sha,
         })
 
     # Create new tree
     tree = await github.rest(
+        GitTreeResponse,
         "POST",
         f"/repos/{owner}/{repo}/git/trees",
-        json={"base_tree": base_commit["tree"]["sha"], "tree": tree_items},
+        json={"base_tree": base_commit.tree.sha, "tree": tree_items},
     )
 
     # Create commit
     commit = await github.rest(
+        GitCommitResponse,
         "POST",
         f"/repos/{owner}/{repo}/git/commits",
-        json={"message": message, "tree": tree["sha"], "parents": [base_sha]},
+        json={"message": message, "tree": tree.sha, "parents": [base_sha]},
     )
 
     # Update ref
-    await github.rest(
+    await github.rest_raw(
         "PATCH",
         f"/repos/{owner}/{repo}/git/refs/heads/{quote(branch, safe='')}",
-        json={"sha": commit["sha"]},
+        json={"sha": commit.sha},
     )
 
-    return {"sha": commit["sha"], "url": commit.get("html_url", "")}
+    return CommitResult(sha=commit.sha, url=commit.html_url)
