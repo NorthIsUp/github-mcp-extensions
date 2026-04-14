@@ -10,6 +10,8 @@ Tools:
   add_reaction            React to a review comment with an emoji
   edit_review_comment     Edit the body of a review comment
   request_reviewers       Add or remove reviewers on a PR
+  resolve_review_thread   Mark a review thread as resolved
+  unresolve_review_thread Mark a resolved review thread as unresolved
 
 Usage with Claude Code / MCP clients:
 
@@ -50,8 +52,10 @@ from .models import (
     ReactionResponse,
     RequestReviewersResponse,
     RequestReviewersResult,
+    ResolveReviewThreadResult,
     ReviewInfo,
     ThreadResult,
+    UnresolveReviewThreadResult,
 )
 from .suggestion_utils import (
     apply_multiple_suggestions,
@@ -453,6 +457,70 @@ async def request_reviewers(
         action=action,
         requested_reviewers=[r.login for r in result.requested_reviewers],
         requested_teams=[t.slug for t in result.requested_teams],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tool 8: resolve_review_thread
+# ═══════════════════════════════════════════════════════════════════════
+
+_RESOLVE_THREAD_MUTATION = """
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+"""
+
+_UNRESOLVE_THREAD_MUTATION = """
+mutation UnresolveReviewThread($threadId: ID!) {
+  unresolveReviewThread(input: {threadId: $threadId}) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+"""
+
+
+@mcp.tool()
+async def resolve_review_thread(
+    thread_id: Annotated[str, "GraphQL node ID of the review thread (PRRT_… from get_review_comments)"],
+) -> ResolveReviewThreadResult:
+    """Mark a pull request review thread as resolved.
+
+    Use after addressing the feedback in a thread. The thread_id (PRRT_…)
+    is returned by get_review_comments as thread_node_id.
+    """
+    github = _get_github()
+    data = await github.graphql_raw(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
+    return ResolveReviewThreadResult(
+        thread_node_id=data["resolveReviewThread"]["thread"]["id"],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tool 9: unresolve_review_thread
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+async def unresolve_review_thread(
+    thread_id: Annotated[str, "GraphQL node ID of the review thread (PRRT_… from get_review_comments)"],
+) -> UnresolveReviewThreadResult:
+    """Mark a previously resolved pull request review thread as unresolved.
+
+    Use to reopen a thread if follow-up is needed after it was resolved.
+    The thread_id (PRRT_…) is returned by get_review_comments as thread_node_id.
+    """
+    github = _get_github()
+    data = await github.graphql_raw(_UNRESOLVE_THREAD_MUTATION, {"threadId": thread_id})
+    return UnresolveReviewThreadResult(
+        thread_node_id=data["unresolveReviewThread"]["thread"]["id"],
     )
 
 

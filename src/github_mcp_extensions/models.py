@@ -323,3 +323,13 @@ class RequestReviewersResult(BaseModel):
     action: str
     requested_reviewers: list[str]
     requested_teams: list[str]
+
+
+class ResolveReviewThreadResult(BaseModel):
+    resolved: bool = True
+    thread_node_id: str
+
+
+class UnresolveReviewThreadResult(BaseModel):
+    unresolved: bool = True
+    thread_node_id: str

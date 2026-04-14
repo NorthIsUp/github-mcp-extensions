@@ -16,9 +16,11 @@ from github_mcp_extensions.models import (
     GitHubUser,
     ParsedSuggestion,
     RequestReviewersResult,
+    ResolveReviewThreadResult,
     ReviewCommentResponse,
     ReviewInfo,
     ThreadResult,
+    UnresolveReviewThreadResult,
 )
 from github_mcp_extensions.suggestion_utils import (
     apply_suggestion_to_content,
@@ -36,6 +38,8 @@ EXPECTED_TOOLS = [
     "add_reaction",
     "edit_review_comment",
     "request_reviewers",
+    "resolve_review_thread",
+    "unresolve_review_thread",
 ]
 
 
@@ -225,3 +229,5 @@ def test_all_result_models_have_defaults():
     assert DismissReviewResult(review_id=1, state="DISMISSED", reviewer=None, message="m").dismissed is True
     assert AddReactionResult(reaction_id=1, content="+1", user=None).added is True
     assert EditReviewCommentResult(comment_id=1, body="b", updated_at="t", url="u").edited is True
+    assert ResolveReviewThreadResult(thread_node_id="PRRT_abc").resolved is True
+    assert UnresolveReviewThreadResult(thread_node_id="PRRT_abc").unresolved is True
