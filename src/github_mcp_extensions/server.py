@@ -12,6 +12,7 @@ Tools:
   request_reviewers       Add or remove reviewers on a PR
   resolve_review_thread   Mark a review thread as resolved
   unresolve_review_thread Mark a resolved review thread as unresolved
+  dismiss_finding         Dismiss a Copilot/code-scanning finding (resolves thread)
 
 Usage with Claude Code / MCP clients:
 
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import re
 from base64 import b64decode, b64encode
+from dataclasses import dataclass, field
 from typing import Annotated, Literal
 from urllib.parse import quote
 
@@ -79,7 +81,8 @@ _CommentIdParam = Annotated[
     "Review comment ID. Accepted forms: "
     "(1) integer e.g. 3076443930 — from get_review_comments → comment.id; "
     "(2) 'r<n>' e.g. 'r3076443930' — the anchor suffix in any GitHub comment URL; "
-    "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930'.",
+    "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930' "
+    "— owner, repo, and pull_number are inferred automatically from the URL.",
 ]
 
 _ThreadIdParam = Annotated[
@@ -113,27 +116,45 @@ def _norm(owner: str, repo: str) -> tuple[str, str]:
     return owner.lower(), repo.lower()
 
 
-def _parse_comment_id(comment_id: int | str) -> int:
-    """Accept an integer, 'r3076443930', or a GitHub comment URL and return the numeric ID.
+@dataclass
+class _CommentRef:
+    """Parsed comment reference — all context extractable from a GitHub comment URL."""
+    comment_id: int
+    owner: str | None = field(default=None)
+    repo: str | None = field(default=None)
+    pull_number: int | None = field(default=None)
 
-    Supported forms:
-      - 123456789           (plain integer or string)
-      - r123456789          (anchor suffix from GitHub URLs)
-      - https://github.com/.../pull/1#discussion_r123456789
-    """
+
+# Captures: owner(1) repo(2) pull_number(3) comment_db_id(4)
+_GH_COMMENT_URL_RE = re.compile(
+    r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)#discussion_r(\d+)$"
+)
+
+
+def _parse_comment_ref(comment_id: int | str) -> _CommentRef:
+    """Parse any comment ID form into a _CommentRef, extracting owner/repo/PR when a URL is given."""
     if isinstance(comment_id, int):
-        return comment_id
+        return _CommentRef(comment_id=comment_id)
     s = str(comment_id).strip()
-    if m := re.search(r"#discussion_r(\d+)$", s):
-        return int(m.group(1))
+    if m := _GH_COMMENT_URL_RE.match(s):
+        return _CommentRef(
+            comment_id=int(m.group(4)),
+            owner=m.group(1).lower(),
+            repo=m.group(2).lower(),
+            pull_number=int(m.group(3)),
+        )
     if m := re.match(r"^r(\d+)$", s):
-        return int(m.group(1))
+        return _CommentRef(comment_id=int(m.group(1)))
     if s.isdigit():
-        return int(s)
+        return _CommentRef(comment_id=int(s))
     raise ValueError(
         f"Cannot parse comment ID from {s!r}. "
         "Expected an integer, 'r<n>', or a GitHub comment URL."
     )
+
+
+def _parse_comment_id(comment_id: int | str) -> int:
+    return _parse_comment_ref(comment_id).comment_id
 
 
 _THREAD_FROM_COMMENT_QUERY = """
@@ -147,18 +168,13 @@ query GetThreadFromComment($nodeId: ID!) {
 """
 
 
-_GH_COMMENT_URL_RE = re.compile(
-    r"https://github\.com/([^/]+)/([^/]+)/pull/\d+#discussion_r(\d+)$"
-)
-
-
 async def _resolve_to_thread_id(github: GitHubAPI, id_or_url: str) -> str:
     """Accept a thread node ID, comment node ID, or GitHub comment URL and return PRRT_….
 
     Supported forms:
       - PRRT_kwDO…                                    thread node ID — used directly
       - PRRC_kwDO…                                    comment node ID — parent thread looked up
-      - https://github.com/…/pull/1#discussion_r456   comment URL — REST + GraphQL lookup
+      - https://github.com/…/pull/N#discussion_rN     comment URL — REST + GraphQL lookup
     """
     if id_or_url.startswith("PRRT_"):
         return id_or_url
@@ -169,8 +185,7 @@ async def _resolve_to_thread_id(github: GitHubAPI, id_or_url: str) -> str:
         except (KeyError, TypeError):
             raise ValueError(f"Could not find parent thread for comment node {id_or_url!r}")
     if m := _GH_COMMENT_URL_RE.match(id_or_url):
-        owner, repo, comment_db_id = m.group(1).lower(), m.group(2).lower(), m.group(3)
-        # REST gives us the comment's GraphQL node ID (PRRC_…)
+        owner, repo, comment_db_id = m.group(1).lower(), m.group(2).lower(), m.group(4)
         comment_data = await github.rest_raw(
             "GET", f"/repos/{owner}/{repo}/pulls/comments/{comment_db_id}"
         )
@@ -331,19 +346,27 @@ async def get_review_comments(
 
 @mcp.tool()
 async def apply_suggestion(
-    owner: Annotated[str, "Repository owner"],
-    repo: Annotated[str, "Repository name"],
-    pull_number: Annotated[int, "Pull request number"],
     comment_id: _CommentIdParam,
+    owner: Annotated[str | None, "Repository owner — inferred automatically when comment_id is a full GitHub URL"] = None,
+    repo: Annotated[str | None, "Repository name — inferred automatically when comment_id is a full GitHub URL"] = None,
+    pull_number: Annotated[int | None, "PR number — inferred automatically when comment_id is a full GitHub URL"] = None,
     commit_message: Annotated[str | None, "Custom commit message (optional)"] = None,
 ) -> ApplySuggestionResult:
-    """Apply a single code suggestion from a PR review comment.
+    """Apply a single code suggestion — equivalent to GitHub's 'Commit suggestion' button.
 
-    Reads the ```suggestion block, modifies the file, and creates a commit
-    on the PR branch.
+    Pass a full GitHub comment URL as comment_id and owner/repo/pull_number are
+    inferred automatically. Reads the ```suggestion block, modifies the file,
+    and creates a commit on the PR branch.
     """
-    owner, repo = _norm(owner, repo)
-    comment_id = _parse_comment_id(comment_id)
+    ref = _parse_comment_ref(comment_id)
+    owner = (owner or ref.owner or "").lower() or None
+    repo = (repo or ref.repo or "").lower() or None
+    pull_number = pull_number or ref.pull_number
+    if not owner or not repo or not pull_number:
+        raise ValueError(
+            "owner, repo, and pull_number are required when comment_id is not a full GitHub comment URL."
+        )
+    comment_id = ref.comment_id
     github = _get_github()
 
     # 1. Parse suggestion from the comment
@@ -399,19 +422,28 @@ async def apply_suggestion(
 
 @mcp.tool()
 async def apply_suggestions_batch(
-    owner: Annotated[str, "Repository owner"],
-    repo: Annotated[str, "Repository name"],
-    pull_number: Annotated[int, "Pull request number"],
-    comment_ids: Annotated[list[_CommentIdParam], "List of review comment IDs — see comment_id for accepted forms."],
+    comment_ids: Annotated[list[_CommentIdParam], "List of review comment IDs — see apply_suggestion for accepted forms. When all entries are full GitHub URLs, owner/repo/pull_number are inferred from the first URL."],
+    owner: Annotated[str | None, "Repository owner — inferred automatically when comment_ids are full GitHub URLs"] = None,
+    repo: Annotated[str | None, "Repository name — inferred automatically when comment_ids are full GitHub URLs"] = None,
+    pull_number: Annotated[int | None, "PR number — inferred automatically when comment_ids are full GitHub URLs"] = None,
     commit_message: Annotated[str | None, "Custom commit message (optional)"] = None,
 ) -> ApplySuggestionsBatchResult:
-    """Apply multiple code suggestions from PR review comments in a single commit.
+    """Apply multiple code suggestions in a single commit — equivalent to GitHub's 'Add suggestion to batch' then commit.
 
-    Reads each ```suggestion block, modifies the affected files, and creates
-    one atomic commit on the PR branch via the Git Data API.
+    Pass full GitHub comment URLs and owner/repo/pull_number are inferred
+    automatically. Reads each ```suggestion block, modifies the affected files,
+    and creates one atomic commit on the PR branch via the Git Data API.
     """
-    owner, repo = _norm(owner, repo)
-    comment_ids = [_parse_comment_id(c) for c in comment_ids]
+    refs = [_parse_comment_ref(c) for c in comment_ids]
+    first = refs[0]
+    owner = (owner or first.owner or "").lower() or None
+    repo = (repo or first.repo or "").lower() or None
+    pull_number = pull_number or first.pull_number
+    if not owner or not repo or not pull_number:
+        raise ValueError(
+            "owner, repo, and pull_number are required when comment_ids are not full GitHub comment URLs."
+        )
+    comment_ids_int = [r.comment_id for r in refs]
     github = _get_github()
 
     # 1. Get PR to find the head branch (also validates the PR exists)
@@ -419,10 +451,10 @@ async def apply_suggestions_batch(
     head_ref = pr.head.ref
 
     # 2. Fetch, parse, and apply all suggestions to file contents
-    changes = await apply_multiple_suggestions(github, owner, repo, pull_number, comment_ids)
+    changes = await apply_multiple_suggestions(github, owner, repo, pull_number, comment_ids_int)
 
     # 3. Commit all changes atomically
-    count = len(comment_ids)
+    count = len(comment_ids_int)
     message = commit_message or f"Apply {count} suggestion{'s' if count > 1 else ''} from code review"
 
     commit = await commit_file_changes(github, owner, repo, head_ref, message, changes)
@@ -645,6 +677,31 @@ async def unresolve_review_thread(
     data = await github.graphql_raw(_UNRESOLVE_THREAD_MUTATION, {"threadId": thread_id})
     return UnresolveReviewThreadResult(
         thread_node_id=data["unresolveReviewThread"]["thread"]["id"],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tool 10: dismiss_finding
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+async def dismiss_finding(
+    thread_id: _ThreadIdParam,
+) -> ResolveReviewThreadResult:
+    """Dismiss a Copilot or code-scanning finding on a pull request.
+
+    Equivalent to the 'Dismiss finding' button in GitHub's PR review UI —
+    marks the thread as resolved. Accepts the same ID forms as resolve_review_thread:
+      1. PRRT_… thread node ID — from get_review_comments → thread_node_id
+      2. PRRC_… comment node ID — from get_review_comments → comment.node_id
+      3. GitHub comment URL — https://github.com/org/repo/pull/N#discussion_rN
+    """
+    github = _get_github()
+    thread_id = await _resolve_to_thread_id(github, thread_id)
+    data = await github.graphql_raw(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
+    return ResolveReviewThreadResult(
+        thread_node_id=data["resolveReviewThread"]["thread"]["id"],
     )
 
 

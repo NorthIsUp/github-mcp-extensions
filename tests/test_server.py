@@ -22,7 +22,7 @@ from github_mcp_extensions.models import (
     ThreadResult,
     UnresolveReviewThreadResult,
 )
-from github_mcp_extensions.server import _GH_COMMENT_URL_RE, _norm, _parse_comment_id
+from github_mcp_extensions.server import _GH_COMMENT_URL_RE, _norm, _parse_comment_id, _parse_comment_ref
 from github_mcp_extensions.suggestion_utils import (
     apply_suggestion_to_content,
     parse_suggestion_from_body,
@@ -41,6 +41,7 @@ EXPECTED_TOOLS = [
     "request_reviewers",
     "resolve_review_thread",
     "unresolve_review_thread",
+    "dismiss_finding",
 ]
 
 
@@ -97,12 +98,29 @@ def test_gh_comment_url_re_matches():
     assert m is not None
     assert m.group(1) == "teamclara"
     assert m.group(2) == "Clara_V1"
-    assert m.group(3) == "3076443930"
+    assert m.group(3) == "656"
+    assert m.group(4) == "3076443930"
 
 
 def test_gh_comment_url_re_no_match_without_anchor():
     url = "https://github.com/org/repo/pull/1"
     assert _GH_COMMENT_URL_RE.match(url) is None
+
+
+def test_parse_comment_ref_from_url():
+    url = "https://github.com/teamclara/Clara_V1/pull/656#discussion_r3076443930"
+    ref = _parse_comment_ref(url)
+    assert ref.comment_id == 3076443930
+    assert ref.owner == "teamclara"
+    assert ref.repo == "clara_v1"
+    assert ref.pull_number == 656
+
+
+def test_parse_comment_ref_from_integer():
+    ref = _parse_comment_ref(123)
+    assert ref.comment_id == 123
+    assert ref.owner is None
+    assert ref.pull_number is None
 
 
 # ── Suggestion parsing ──────────────────────────────────────────────
