@@ -72,6 +72,25 @@ from .suggestion_utils import (
     parse_suggestion_from_body,
 )
 
+# ── Shared parameter type aliases ───────────────────────────────────
+
+_CommentIdParam = Annotated[
+    int | str,
+    "Review comment ID. Accepted forms: "
+    "(1) integer e.g. 3076443930 — from get_review_comments → comment.id; "
+    "(2) 'r<n>' e.g. 'r3076443930' — the anchor suffix in any GitHub comment URL; "
+    "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930'.",
+]
+
+_ThreadIdParam = Annotated[
+    str,
+    "Review thread identifier. Accepted forms: "
+    "(1) thread node ID e.g. 'PRRT_kwDO…' — from get_review_comments → thread_node_id (preferred, zero extra API calls); "
+    "(2) comment node ID e.g. 'PRRC_kwDO…' — from get_review_comments → comment.node_id (parent thread looked up via GraphQL); "
+    "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930' "
+    "(comment fetched via REST to get node ID, then parent thread looked up via GraphQL).",
+]
+
 # ── Server + API client ─────────────────────────────────────────────
 
 mcp = FastMCP("github_extensions")
@@ -315,13 +334,7 @@ async def apply_suggestion(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
     pull_number: Annotated[int, "Pull request number"],
-    comment_id: Annotated[
-        int | str,
-        "Review comment ID. Accepted forms: "
-        "(1) integer e.g. 3076443930 — from get_review_comments → comment.id; "
-        "(2) 'r<n>' e.g. 'r3076443930' — the anchor suffix in any GitHub comment URL; "
-        "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930'.",
-    ],
+    comment_id: _CommentIdParam,
     commit_message: Annotated[str | None, "Custom commit message (optional)"] = None,
 ) -> ApplySuggestionResult:
     """Apply a single code suggestion from a PR review comment.
@@ -389,13 +402,7 @@ async def apply_suggestions_batch(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
     pull_number: Annotated[int, "Pull request number"],
-    comment_ids: Annotated[
-        list[int | str],
-        "List of review comment IDs. Each entry may be: "
-        "(1) integer e.g. 3076443930 — from get_review_comments → comment.id; "
-        "(2) 'r<n>' e.g. 'r3076443930' — the anchor suffix in any GitHub comment URL; "
-        "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930'.",
-    ],
+    comment_ids: Annotated[list[_CommentIdParam], "List of review comment IDs — see comment_id for accepted forms."],
     commit_message: Annotated[str | None, "Custom commit message (optional)"] = None,
 ) -> ApplySuggestionsBatchResult:
     """Apply multiple code suggestions from PR review comments in a single commit.
@@ -472,13 +479,7 @@ async def dismiss_review(
 async def add_reaction(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
-    comment_id: Annotated[
-        int | str,
-        "Review comment ID. Accepted forms: "
-        "(1) integer e.g. 3076443930 — from get_review_comments → comment.id; "
-        "(2) 'r<n>' e.g. 'r3076443930' — the anchor suffix in any GitHub comment URL; "
-        "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930'.",
-    ],
+    comment_id: _CommentIdParam,
     reaction: Annotated[
         Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
         "Reaction emoji",
@@ -514,13 +515,7 @@ async def add_reaction(
 async def edit_review_comment(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
-    comment_id: Annotated[
-        int | str,
-        "Review comment ID. Accepted forms: "
-        "(1) integer e.g. 3076443930 — from get_review_comments → comment.id; "
-        "(2) 'r<n>' e.g. 'r3076443930' — the anchor suffix in any GitHub comment URL; "
-        "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930'.",
-    ],
+    comment_id: _CommentIdParam,
     body: Annotated[str, "New comment body (markdown)"],
 ) -> EditReviewCommentResult:
     """Edit the body of an existing pull request review comment.
@@ -612,14 +607,7 @@ mutation UnresolveReviewThread($threadId: ID!) {
 
 @mcp.tool()
 async def resolve_review_thread(
-    thread_id: Annotated[
-        str,
-        "Review thread identifier. Accepted forms: "
-        "(1) thread node ID e.g. 'PRRT_kwDO…' — from get_review_comments → thread_node_id (preferred, zero extra API calls); "
-        "(2) comment node ID e.g. 'PRRC_kwDO…' — from get_review_comments → comment.node_id (parent thread looked up via GraphQL); "
-        "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930' "
-        "(comment fetched via REST to get node ID, then parent thread looked up via GraphQL).",
-    ],
+    thread_id: _ThreadIdParam,
 ) -> ResolveReviewThreadResult:
     """Mark a pull request review thread as resolved.
 
@@ -643,14 +631,7 @@ async def resolve_review_thread(
 
 @mcp.tool()
 async def unresolve_review_thread(
-    thread_id: Annotated[
-        str,
-        "Review thread identifier. Accepted forms: "
-        "(1) thread node ID e.g. 'PRRT_kwDO…' — from get_review_comments → thread_node_id (preferred, zero extra API calls); "
-        "(2) comment node ID e.g. 'PRRC_kwDO…' — from get_review_comments → comment.node_id (parent thread looked up via GraphQL); "
-        "(3) full GitHub comment URL e.g. 'https://github.com/org/repo/pull/1#discussion_r3076443930' "
-        "(comment fetched via REST to get node ID, then parent thread looked up via GraphQL).",
-    ],
+    thread_id: _ThreadIdParam,
 ) -> UnresolveReviewThreadResult:
     """Mark a previously resolved pull request review thread as unresolved.
 
