@@ -20,14 +20,21 @@ Usage with Claude Code / MCP clients:
       "github_extensions": {
         "command": "uvx",
         "args": ["github-mcp-extensions"],
-        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "..." }
+        "env": {
+          "GITHUB_PERSONAL_ACCESS_TOKEN": "...",
+          "GITHUB_API_URL": "https://api.github.com"
+        }
       }
     }
   }
+
+Set GITHUB_API_URL to point at the same proxy as the standard GitHub MCP if you need
+to share auth/org access (e.g. "http://127.0.0.1:35420").
 """
 
 from __future__ import annotations
 
+import re
 from base64 import b64decode, b64encode
 from typing import Annotated, Literal
 from urllib.parse import quote
@@ -78,6 +85,87 @@ def _get_github() -> GitHubAPI:
     if _github is None:
         _github = GitHubAPI()
     return _github
+
+
+# ── ID normalisation helpers ─────────────────────────────────────────
+
+def _norm(owner: str, repo: str) -> tuple[str, str]:
+    """Lowercase owner and repo — GitHub is case-insensitive but GraphQL is not."""
+    return owner.lower(), repo.lower()
+
+
+def _parse_comment_id(comment_id: int | str) -> int:
+    """Accept an integer, 'r3076443930', or a GitHub comment URL and return the numeric ID.
+
+    Supported forms:
+      - 123456789           (plain integer or string)
+      - r123456789          (anchor suffix from GitHub URLs)
+      - https://github.com/.../pull/1#discussion_r123456789
+    """
+    if isinstance(comment_id, int):
+        return comment_id
+    s = str(comment_id).strip()
+    if m := re.search(r"#discussion_r(\d+)$", s):
+        return int(m.group(1))
+    if m := re.match(r"^r(\d+)$", s):
+        return int(m.group(1))
+    if s.isdigit():
+        return int(s)
+    raise ValueError(
+        f"Cannot parse comment ID from {s!r}. "
+        "Expected an integer, 'r<n>', or a GitHub comment URL."
+    )
+
+
+_THREAD_FROM_COMMENT_QUERY = """
+query GetThreadFromComment($nodeId: ID!) {
+  node(id: $nodeId) {
+    ... on PullRequestReviewComment {
+      pullRequestThread { id }
+    }
+  }
+}
+"""
+
+
+_GH_COMMENT_URL_RE = re.compile(
+    r"https://github\.com/([^/]+)/([^/]+)/pull/\d+#discussion_r(\d+)$"
+)
+
+
+async def _resolve_to_thread_id(github: GitHubAPI, id_or_url: str) -> str:
+    """Accept a thread node ID, comment node ID, or GitHub comment URL and return PRRT_….
+
+    Supported forms:
+      - PRRT_kwDO…                                    thread node ID — used directly
+      - PRRC_kwDO…                                    comment node ID — parent thread looked up
+      - https://github.com/…/pull/1#discussion_r456   comment URL — REST + GraphQL lookup
+    """
+    if id_or_url.startswith("PRRT_"):
+        return id_or_url
+    if id_or_url.startswith("PRRC_"):
+        data = await github.graphql_raw(_THREAD_FROM_COMMENT_QUERY, {"nodeId": id_or_url})
+        try:
+            return data["node"]["pullRequestThread"]["id"]
+        except (KeyError, TypeError):
+            raise ValueError(f"Could not find parent thread for comment node {id_or_url!r}")
+    if m := _GH_COMMENT_URL_RE.match(id_or_url):
+        owner, repo, comment_db_id = m.group(1).lower(), m.group(2).lower(), m.group(3)
+        # REST gives us the comment's GraphQL node ID (PRRC_…)
+        comment_data = await github.rest_raw(
+            "GET", f"/repos/{owner}/{repo}/pulls/comments/{comment_db_id}"
+        )
+        node_id = comment_data["node_id"]
+        data = await github.graphql_raw(_THREAD_FROM_COMMENT_QUERY, {"nodeId": node_id})
+        try:
+            return data["node"]["pullRequestThread"]["id"]
+        except (KeyError, TypeError):
+            raise ValueError(f"Could not find parent thread for comment URL {id_or_url!r}")
+    raise ValueError(
+        f"Unrecognised ID format {id_or_url!r}. "
+        "Expected a thread node ID (PRRT_…), comment node ID (PRRC_…), "
+        "or GitHub comment URL (https://github.com/…/pull/N#discussion_rN)."
+    )
 
 
 # ── GraphQL query for review threads ────────────────────────────────
@@ -153,6 +241,7 @@ async def get_review_comments(
     id (for add_reply / apply_suggestion), and parsed suggestion metadata.
     Superset of the standard GitHub MCP's get_review_comments.
     """
+    owner, repo = _norm(owner, repo)
     github = _get_github()
     data = await github.graphql(
         GqlReviewThreadsResponse,
@@ -226,7 +315,7 @@ async def apply_suggestion(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
     pull_number: Annotated[int, "Pull request number"],
-    comment_id: Annotated[int, "Numeric REST ID of the review comment containing the suggestion"],
+    comment_id: Annotated[int | str, "Comment ID — integer, 'r<n>', or GitHub comment URL"],
     commit_message: Annotated[str | None, "Custom commit message (optional)"] = None,
 ) -> ApplySuggestionResult:
     """Apply a single code suggestion from a PR review comment.
@@ -234,6 +323,8 @@ async def apply_suggestion(
     Reads the ```suggestion block, modifies the file, and creates a commit
     on the PR branch.
     """
+    owner, repo = _norm(owner, repo)
+    comment_id = _parse_comment_id(comment_id)
     github = _get_github()
 
     # 1. Parse suggestion from the comment
@@ -292,7 +383,7 @@ async def apply_suggestions_batch(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
     pull_number: Annotated[int, "Pull request number"],
-    comment_ids: Annotated[list[int], "Array of numeric REST IDs of review comments containing suggestions"],
+    comment_ids: Annotated[list[int | str], "Comment IDs — each may be an integer, 'r<n>', or GitHub comment URL"],
     commit_message: Annotated[str | None, "Custom commit message (optional)"] = None,
 ) -> ApplySuggestionsBatchResult:
     """Apply multiple code suggestions from PR review comments in a single commit.
@@ -300,6 +391,8 @@ async def apply_suggestions_batch(
     Reads each ```suggestion block, modifies the affected files, and creates
     one atomic commit on the PR branch via the Git Data API.
     """
+    owner, repo = _norm(owner, repo)
+    comment_ids = [_parse_comment_id(c) for c in comment_ids]
     github = _get_github()
 
     # 1. Get PR to find the head branch (also validates the PR exists)
@@ -341,6 +434,7 @@ async def dismiss_review(
     Use after addressing feedback to clear a 'changes requested' review.
     Requires write access to the repository.
     """
+    owner, repo = _norm(owner, repo)
     github = _get_github()
     result = await github.rest(
         DismissReviewResponse,
@@ -366,7 +460,7 @@ async def dismiss_review(
 async def add_reaction(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
-    comment_id: Annotated[int, "Numeric REST ID of the review comment"],
+    comment_id: Annotated[int | str, "Comment ID — integer, 'r<n>', or GitHub comment URL"],
     reaction: Annotated[
         Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
         "Reaction emoji",
@@ -376,6 +470,8 @@ async def add_reaction(
 
     Use for lightweight acknowledgment (thumbs up, etc.) without posting a full reply.
     """
+    owner, repo = _norm(owner, repo)
+    comment_id = _parse_comment_id(comment_id)
     github = _get_github()
     result = await github.rest(
         ReactionResponse,
@@ -400,13 +496,15 @@ async def add_reaction(
 async def edit_review_comment(
     owner: Annotated[str, "Repository owner"],
     repo: Annotated[str, "Repository name"],
-    comment_id: Annotated[int, "Numeric REST ID of the review comment to edit"],
+    comment_id: Annotated[int | str, "Comment ID — integer, 'r<n>', or GitHub comment URL"],
     body: Annotated[str, "New comment body (markdown)"],
 ) -> EditReviewCommentResult:
     """Edit the body of an existing pull request review comment.
 
     Useful for updating a reply after fixing the issue it referenced.
     """
+    owner, repo = _norm(owner, repo)
+    comment_id = _parse_comment_id(comment_id)
     github = _get_github()
     result = await github.rest(
         EditCommentResponse,
@@ -438,6 +536,7 @@ async def request_reviewers(
     team_reviewers: Annotated[list[str] | None, "Team slugs to add/remove as reviewers"] = None,
 ) -> RequestReviewersResult:
     """Add or remove reviewers (users and/or teams) on a pull request."""
+    owner, repo = _norm(owner, repo)
     github = _get_github()
 
     if not reviewers and not team_reviewers:
@@ -489,14 +588,16 @@ mutation UnresolveReviewThread($threadId: ID!) {
 
 @mcp.tool()
 async def resolve_review_thread(
-    thread_id: Annotated[str, "GraphQL node ID of the review thread (PRRT_… from get_review_comments)"],
+    thread_id: Annotated[str, "Thread node ID (PRRT_…), comment node ID (PRRC_…), or GitHub comment URL"],
 ) -> ResolveReviewThreadResult:
     """Mark a pull request review thread as resolved.
 
-    Use after addressing the feedback in a thread. The thread_id (PRRT_…)
-    is returned by get_review_comments as thread_node_id.
+    Accepts a thread node ID (PRRT_…), a comment node ID (PRRC_…), or a full
+    GitHub comment URL (https://github.com/…/pull/N#discussion_rN). When given
+    a comment ID or URL the parent thread is looked up automatically.
     """
     github = _get_github()
+    thread_id = await _resolve_to_thread_id(github, thread_id)
     data = await github.graphql_raw(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
     return ResolveReviewThreadResult(
         thread_node_id=data["resolveReviewThread"]["thread"]["id"],
@@ -510,14 +611,16 @@ async def resolve_review_thread(
 
 @mcp.tool()
 async def unresolve_review_thread(
-    thread_id: Annotated[str, "GraphQL node ID of the review thread (PRRT_… from get_review_comments)"],
+    thread_id: Annotated[str, "Thread node ID (PRRT_…), comment node ID (PRRC_…), or GitHub comment URL"],
 ) -> UnresolveReviewThreadResult:
     """Mark a previously resolved pull request review thread as unresolved.
 
-    Use to reopen a thread if follow-up is needed after it was resolved.
-    The thread_id (PRRT_…) is returned by get_review_comments as thread_node_id.
+    Accepts a thread node ID (PRRT_…), a comment node ID (PRRC_…), or a full
+    GitHub comment URL (https://github.com/…/pull/N#discussion_rN). When given
+    a comment ID or URL the parent thread is looked up automatically.
     """
     github = _get_github()
+    thread_id = await _resolve_to_thread_id(github, thread_id)
     data = await github.graphql_raw(_UNRESOLVE_THREAD_MUTATION, {"threadId": thread_id})
     return UnresolveReviewThreadResult(
         thread_node_id=data["unresolveReviewThread"]["thread"]["id"],

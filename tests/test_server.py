@@ -22,6 +22,7 @@ from github_mcp_extensions.models import (
     ThreadResult,
     UnresolveReviewThreadResult,
 )
+from github_mcp_extensions.server import _GH_COMMENT_URL_RE, _norm, _parse_comment_id
 from github_mcp_extensions.suggestion_utils import (
     apply_suggestion_to_content,
     parse_suggestion_from_body,
@@ -55,6 +56,53 @@ def test_server_name():
     from github_mcp_extensions.server import mcp
 
     assert mcp.name == "github_extensions"
+
+
+# ── ID normalisation ────────────────────────────────────────────────
+
+
+def test_norm_lowercases():
+    assert _norm("NorthIsUp", "Clara_V1") == ("northisup", "clara_v1")
+
+
+def test_norm_already_lower():
+    assert _norm("org", "repo") == ("org", "repo")
+
+
+def test_parse_comment_id_integer():
+    assert _parse_comment_id(123) == 123
+
+
+def test_parse_comment_id_r_prefix():
+    assert _parse_comment_id("r3076443930") == 3076443930
+
+
+def test_parse_comment_id_plain_string():
+    assert _parse_comment_id("456") == 456
+
+
+def test_parse_comment_id_url():
+    url = "https://github.com/org/repo/pull/1#discussion_r3076443930"
+    assert _parse_comment_id(url) == 3076443930
+
+
+def test_parse_comment_id_invalid():
+    with pytest.raises(ValueError):
+        _parse_comment_id("not-an-id")
+
+
+def test_gh_comment_url_re_matches():
+    url = "https://github.com/teamclara/Clara_V1/pull/656#discussion_r3076443930"
+    m = _GH_COMMENT_URL_RE.match(url)
+    assert m is not None
+    assert m.group(1) == "teamclara"
+    assert m.group(2) == "Clara_V1"
+    assert m.group(3) == "3076443930"
+
+
+def test_gh_comment_url_re_no_match_without_anchor():
+    url = "https://github.com/org/repo/pull/1"
+    assert _GH_COMMENT_URL_RE.match(url) is None
 
 
 # ── Suggestion parsing ──────────────────────────────────────────────
