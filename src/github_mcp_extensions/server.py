@@ -13,6 +13,9 @@ Tools:
   resolve_review_thread   Mark a review thread as resolved
   unresolve_review_thread Mark a resolved review thread as unresolved
   dismiss_finding         Dismiss a Copilot/code-scanning finding (resolves thread)
+  dismiss_code_quality_finding
+                          Dismiss a github-code-quality[bot] finding via the
+                          private PR endpoint (session-cookie auth)
 
 Usage with Claude Code / MCP clients:
 
@@ -44,12 +47,14 @@ from urllib.parse import quote
 from mcp.server.fastmcp import FastMCP
 
 from .github_api import GitHubAPI
+from .github_web import GitHubWebSession
 from .models import (
     AddReactionResult,
     ApplySuggestionResult,
     ApplySuggestionsBatchResult,
     CommentResult,
     ContentCommitResponse,
+    DismissCodeQualityFindingResult,
     DismissReviewResponse,
     DismissReviewResult,
     EditCommentResponse,
@@ -702,6 +707,66 @@ async def dismiss_finding(
     data = await github.graphql_raw(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
     return ResolveReviewThreadResult(
         thread_node_id=data["resolveReviewThread"]["thread"]["id"],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tool 11: dismiss_code_quality_finding
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+async def dismiss_code_quality_finding(
+    owner: Annotated[str, "Repository owner"],
+    repo: Annotated[str, "Repository name"],
+    pull_number: Annotated[int, "Pull request number"],
+    finding_id: Annotated[
+        int,
+        "automated_review_comments id — NOT the PR review comment id. "
+        "Discoverable in the DOM of the PR page on the 'Dismiss finding' "
+        "button, or in the URL of the dismiss request in DevTools → Network.",
+    ],
+    reason: Annotated[
+        Literal["FALSE_POSITIVE", "USED_IN_TESTS", "WONT_FIX"],
+        "Dismissal reason — matches the three radios in the GitHub UI dialog.",
+    ],
+    resolution_note: Annotated[str, "Optional free-text explanation (may be empty)"] = "",
+) -> DismissCodeQualityFindingResult:
+    """Dismiss a github-code-quality[bot] finding on a pull request.
+
+    Equivalent to clicking 'Dismiss finding' in the PR UI. Uses a private
+    github.com endpoint (not api.github.com) that authenticates via browser
+    session cookies — a PAT / GITHUB_TOKEN is not sufficient.
+
+    `resolve_review_thread` is NOT a substitute: it toggles isResolved on
+    the GraphQL thread but does not update the bot's backing state, so the
+    bot re-posts the same finding on the next commit.
+
+    Required env var:
+      GH_WEB_SESSION_COOKIE — the full Cookie header from an authenticated
+      github.com browser tab (must include _gh_sess, user_session,
+      dotcom_user). Sensitive and short-lived; refresh when it expires.
+      For SAML/SSO orgs, ensure the cookie is from a session where SSO has
+      been activated for the org.
+
+    Implementation note: this relies on an undocumented, private endpoint.
+    GitHub may change the route, headers, or auth at any time. Treat this
+    as a bridge until GitHub ships a first-class API.
+    """
+    owner, repo = _norm(owner, repo)
+    async with GitHubWebSession() as web:
+        await web.dismiss_code_quality_finding(
+            owner=owner,
+            repo=repo,
+            pull_number=pull_number,
+            finding_id=finding_id,
+            reason=reason,
+            resolution_note=resolution_note,
+        )
+    return DismissCodeQualityFindingResult(
+        finding_id=finding_id,
+        reason=reason,
+        resolution_note=resolution_note,
     )
 
 

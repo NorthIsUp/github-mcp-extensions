@@ -9,6 +9,7 @@ from github_mcp_extensions.models import (
     ApplySuggestionResult,
     ApplySuggestionsBatchResult,
     CommentResult,
+    DismissCodeQualityFindingResult,
     DismissReviewResult,
     EditReviewCommentResult,
     FileChange,
@@ -42,6 +43,7 @@ EXPECTED_TOOLS = [
     "resolve_review_thread",
     "unresolve_review_thread",
     "dismiss_finding",
+    "dismiss_code_quality_finding",
 ]
 
 
@@ -297,3 +299,44 @@ def test_all_result_models_have_defaults():
     assert EditReviewCommentResult(comment_id=1, body="b", updated_at="t", url="u").edited is True
     assert ResolveReviewThreadResult(thread_node_id="PRRT_abc").resolved is True
     assert UnresolveReviewThreadResult(thread_node_id="PRRT_abc").unresolved is True
+    assert DismissCodeQualityFindingResult(
+        finding_id=13882761, reason="WONT_FIX", resolution_note=""
+    ).dismissed is True
+
+
+# ── github_web (session cookie client) ──────────────────────────────
+
+
+def test_github_web_requires_cookie(monkeypatch):
+    from github_mcp_extensions.github_web import GitHubWebSession, GitHubWebSessionError
+
+    monkeypatch.delenv("GH_WEB_SESSION_COOKIE", raising=False)
+    with pytest.raises(GitHubWebSessionError, match="GH_WEB_SESSION_COOKIE"):
+        GitHubWebSession()
+
+
+def test_github_web_nonce_regex_finds_uuid_format():
+    from github_mcp_extensions.github_web import _NONCE_RE
+
+    html = (
+        '<html><script>window.payload={"fetchNonce":'
+        '"v2:d773f67b-4069-ecfb-133f-1ec362f98711"};</script></html>'
+    )
+    m = _NONCE_RE.search(html)
+    assert m is not None
+    assert m.group(0) == "v2:d773f67b-4069-ecfb-133f-1ec362f98711"
+
+
+def test_github_web_nonce_regex_no_match_on_plain_page():
+    from github_mcp_extensions.github_web import _NONCE_RE
+
+    assert _NONCE_RE.search("<html>no nonce here</html>") is None
+
+
+def test_github_web_scrub_redacts_cookie():
+    from github_mcp_extensions.github_web import _scrub
+
+    cookie = "_gh_sess=SECRET; user_session=ALSO_SECRET"
+    msg = f"httpx failed with cookie: {cookie}"
+    assert cookie not in _scrub(msg, cookie)
+    assert "<redacted>" in _scrub(msg, cookie)

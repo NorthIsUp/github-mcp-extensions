@@ -333,3 +333,10 @@ class ResolveReviewThreadResult(BaseModel):
 class UnresolveReviewThreadResult(BaseModel):
     unresolved: bool = True
     thread_node_id: str
+
+
+class DismissCodeQualityFindingResult(BaseModel):
+    dismissed: bool = True
+    finding_id: int
+    reason: str
+    resolution_note: str

@@ -142,6 +142,23 @@ Edit the body of an existing review comment.
 | `comment_id` | `int` | Numeric REST ID of the review comment |
 | `body` | `str` | New comment body (markdown) |
 
+### `dismiss_code_quality_finding`
+
+Dismiss a `github-code-quality[bot]` finding on a pull request — equivalent to clicking **Dismiss finding** in the PR UI. Unlike `resolve_review_thread`, this updates the bot's backing state so the finding is not re-posted on subsequent commits.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `owner` | `str` | Repository owner |
+| `repo` | `str` | Repository name |
+| `pull_number` | `int` | Pull request number |
+| `finding_id` | `int` | `automated_review_comments` id — **not** the PR review comment id. Grab from the "Dismiss finding" button in the DOM, or from the dismiss URL in DevTools → Network. |
+| `reason` | `str` | `FALSE_POSITIVE`, `USED_IN_TESTS`, or `WONT_FIX` |
+| `resolution_note` | `str?` | Optional free-text explanation |
+
+**Auth:** this tool calls a private `github.com` endpoint (not `api.github.com`) that authenticates via the user's browser session cookie. `GITHUB_TOKEN` / PATs do not work against this route. Set `GH_WEB_SESSION_COOKIE` to the `Cookie` header value from an authenticated github.com tab (must include `_gh_sess`, `user_session`, `dotcom_user`). Treat it as sensitive and short-lived — refresh when it expires. For SAML/SSO orgs, ensure SSO has been activated for the session.
+
+**Caveat:** this is a private, undocumented endpoint. GitHub may change the route, headers, or auth at any time. Treat as a bridge until GitHub ships a first-class API.
+
 ### `request_reviewers`
 
 Add or remove reviewers (users and/or teams) on a pull request.
@@ -167,6 +184,7 @@ Add or remove reviewers (users and/or teams) on a pull request.
 | React to comment | not available | `add_reaction` |
 | Edit comment | not available | `edit_review_comment` |
 | Manage reviewers | not available | `request_reviewers` |
+| Dismiss github-code-quality[bot] finding | not available | `dismiss_code_quality_finding` (needs session cookie) |
 
 ## Typical workflow
 
@@ -211,3 +229,4 @@ GITHUB_TOKEN=ghp_... uv run mcp dev src/github_mcp_extensions/server.py
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | Alternative (matches standard GitHub MCP) |
 | `GH_TOKEN` | Alternative (matches gh CLI) |
 | `GITHUB_API_URL` | API base URL (default: `https://api.github.com`). Set for GitHub Enterprise. |
+| `GH_WEB_SESSION_COOKIE` | **Only** for `dismiss_code_quality_finding`. Full `Cookie` header from an authenticated github.com browser tab (must include `_gh_sess`, `user_session`, `dotcom_user`). Sensitive and short-lived; refresh when expired. |
